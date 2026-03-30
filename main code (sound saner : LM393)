@@ -1,127 +1,133 @@
 #include <SoftwareSerial.h>
 #include <Wire.h>
 
-
 #define txPin 6
 #define rxPin 7
+#define micPin A2  // MAX9814 接在類比 A2
 SoftwareSerial mySerial(rxPin, txPin);
-
-
-
 
 // 馬達腳位 (L9110S)
 int Motor_IA1 = 10; int Motor_IB1 = 9;  
 int Motor_IA2 = 11; int Motor_IB2 = 3;  
 
+const int MP3_ADDR = 0x7B; 
 
+// --- 聲音偵測參數 ---
+const int sampleWindow = 50; // 採樣時間 (50ms)
+unsigned int peakToPeak = 0;
+const int soundThreshold = 500; // 觸發門檻 (演示前請視環境調整 300-600)
+int triggerCount = 0;
 
+bool isAutoMoving = false;
+unsigned long demoStartTime = 0;
+const int demoDuration = 6000; // 觸發後運作 6 秒
 
-// Hiwonder MP3 I2C 定義
-const int MP3_ADDR = 0x7B; // 修正位址
-
-
-
+unsigned long lastStopTime = 0;
+const int cooldownPeriod = 2000; // 停止後 2 秒內不監聽
 
 void setup() {
   mySerial.begin(9600);
-  Wire.begin();
+  Wire.begin(); // MP3 接 A4/A5
  
   pinMode(Motor_IA1, OUTPUT); pinMode(Motor_IB1, OUTPUT);
   pinMode(Motor_IA2, OUTPUT); pinMode(Motor_IB2, OUTPUT);
   pinMode(13, OUTPUT);
  
   stopMotors();
-  mySerial.println("V4 Fixed. W/S/A/D to move, 1-2 to Play, F to Stop");
+  mySerial.println("System Ready: MAX9814 Mic Active!");
 }
 
-
-
-
 void loop() {
+  // 1. 藍牙手動控制 (隨時優先)
   if (mySerial.available() > 0) {
     char cmd = toupper((char)mySerial.read());
-    switch(cmd) {
-      case 'W': moveForward(); break;
-      case 'S': moveBackward(); break;
-      case 'A': turnLeft(); break;
-      case 'D': turnRight(); break;
-      case 'F': stopMotors(); stopMP3(); break;
-      case '1': playMP3(1); break;
-      case '2': playMP3(2); break;
-      default: blinkError(); break;
-    }
+    handleCommand(cmd);
+  }
+
+  // 2. 哭聲監察：增加一個條件「且目前不在自動執行中」
+  // 同時也要確保手動播放音樂時不會誤觸
+  if (!isAutoMoving) {
+    checkMic();
+  }
+
+  // 3. 自動停止邏輯
+  if (isAutoMoving && (millis() - demoStartTime > demoDuration)) {
+    stopAutoResponse();
   }
 }
 
+void checkMic() {
+  unsigned long startMillis = millis();
+  unsigned int signalMax = 0;
+  unsigned int signalMin = 1024;
 
+  // 在 50ms 內抓取最大與最小電壓值
+  while (millis() - startMillis < sampleWindow) {
+    unsigned int sample = analogRead(micPin);
+    if (sample < 1024) {
+      if (sample > signalMax) signalMax = sample;
+      else if (sample < signalMin) signalMin = sample;
+    }
+  }
+  peakToPeak = signalMax - signalMin; // 計算振幅
 
-
-// --- 運動控制 (L9110S 正確邏輯) ---
-void moveForward() {
-  analogWrite(Motor_IA2, 180); digitalWrite(Motor_IA1, LOW); // 右輪前
-  analogWrite(Motor_IB1, 180); digitalWrite(Motor_IB2, LOW); // 左輪前
+  // 如果振幅超過門檻，觸發演示
+  if (peakToPeak > soundThreshold) {
+    triggerCount++;
+  } else {
+    if (triggerCount > 0) triggerCount--; // 緩慢歸零
+  }
+  // 必須連續偵測到多次高分貝才認定為哭聲
+  if (triggerCount >= 5) { 
+    startAutoResponse();
+    triggerCount = 0; 
+  }
 }
 
-
-
-
-void moveBackward() {
-  digitalWrite(Motor_IA2, LOW); analogWrite(Motor_IA1, 180); // 右輪後
-  digitalWrite(Motor_IB1, LOW); analogWrite(Motor_IB2, 180); // 左輪後
+void startAutoResponse() {
+  isAutoMoving = true;
+  demoStartTime = millis();
+  mySerial.print(">>> [CRY DETECTED] Volume: ");
+  mySerial.println(peakToPeak); // 顯示音量數值，演示時更有感
+  
+  playMP3(1);     
+  moveForward();  
+  digitalWrite(13, HIGH);
 }
 
-
-
-
-void turnLeft() {
-  digitalWrite(Motor_IA2, LOW); analogWrite(Motor_IA1, 150); // 右後
-  analogWrite(Motor_IB1, 150); digitalWrite(Motor_IB2, LOW); // 左前
+void stopAutoResponse() {
+  isAutoMoving = false;
+  stopMotors();
+  stopMP3(); // 確保音樂確實停止
+  digitalWrite(13, LOW);
+  lastStopTime = millis(); // 記錄停止時間
+  mySerial.println(">>> [AUTO STOP] System Cooling Down...");
 }
 
-
-
-
-void turnRight() {
-  analogWrite(Motor_IA2, 150); digitalWrite(Motor_IA1, LOW); // 右前
-  digitalWrite(Motor_IB1, LOW); analogWrite(Motor_IB2, 150); // 左後
+void handleCommand(char cmd) {
+  switch(cmd) {
+    case 'W': moveForward(); break;
+    case 'S': moveBackward(); break;
+    case 'A': turnLeft(); break;
+    case 'D': turnRight(); break;
+    case 'F': stopMotors(); stopMP3(); break;
+    case '1': playMP3(1); break;
+    case '2': playMP3(2); break;
+    default: blinkError(); break;
+  }
 }
 
+// --- 運動控制 (L9110S) ---
+void moveForward() { analogWrite(Motor_IA2, 180); digitalWrite(Motor_IA1, LOW); analogWrite(Motor_IB1, 180); digitalWrite(Motor_IB2, LOW); }
+void moveBackward() { digitalWrite(Motor_IA2, LOW); analogWrite(Motor_IA1, 180); digitalWrite(Motor_IB1, LOW); analogWrite(Motor_IB2, 180); }
+void turnLeft() { digitalWrite(Motor_IA2, LOW); analogWrite(Motor_IA1, 150); analogWrite(Motor_IB1, 150); digitalWrite(Motor_IB2, LOW); }
+void turnRight() { analogWrite(Motor_IA2, 150); digitalWrite(Motor_IA1, LOW); digitalWrite(Motor_IB1, LOW); analogWrite(Motor_IB2, 150); }
+void stopMotors() { digitalWrite(Motor_IA1, LOW); digitalWrite(Motor_IA2, LOW); digitalWrite(Motor_IB1, LOW); digitalWrite(Motor_IB2, LOW); }
 
-
-
-void stopMotors() {
-  digitalWrite(Motor_IA1, LOW); digitalWrite(Motor_IA2, LOW);
-  digitalWrite(Motor_IB1, LOW); digitalWrite(Motor_IB2, LOW);
-}
-
-
-
-
-// --- MP3 控制 ---
+// --- I2C MP3 控制 (A4/A5) ---
 void playMP3(uint16_t trackNum) {
-  uint8_t low = trackNum & 0xFF;
-  uint8_t high = (trackNum >> 8) & 0xFF;
-  Wire.beginTransmission(MP3_ADDR);
-  Wire.write(0x01); // 播放曲目寄存器
-  Wire.write(low);
-  Wire.write(high);
-  Wire.endTransmission();
+  uint8_t low = trackNum & 0xFF; uint8_t high = (trackNum >> 8) & 0xFF;
+  Wire.beginTransmission(MP3_ADDR); Wire.write(0x01); Wire.write(low); Wire.write(high); Wire.endTransmission();
 }
-
-
-
-
-void stopMP3() {
-  Wire.beginTransmission(MP3_ADDR);
-  Wire.write(0x06); // 暫停寄存器
-  Wire.endTransmission();
-}
-
-
-
-
-void blinkError() {
-  digitalWrite(13, HIGH); delay(50); digitalWrite(13, LOW);
-}
-
-
+void stopMP3() { Wire.beginTransmission(MP3_ADDR); Wire.write(0x06); Wire.endTransmission(); }
+void blinkError() { digitalWrite(13, HIGH); delay(50); digitalWrite(13, LOW); }
