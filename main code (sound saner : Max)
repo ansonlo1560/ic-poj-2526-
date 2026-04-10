@@ -5,7 +5,7 @@
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET    -1 
+#define OLED_RESET -1 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 #define txPin 6
@@ -13,13 +13,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define micPin A0 
 SoftwareSerial mySerial(rxPin, txPin);
 
-// 馬達腳位 (L9110S)
 int Motor_IA1 = 10; int Motor_IB1 = 9;  
 int Motor_IA2 = 11; int Motor_IB2 = 3;  
-
 const int MP3_ADDR = 0x7B; 
 
-// --- 聲音偵測參數 ---
 const int sampleWindow = 100; 
 unsigned int peakToPeak = 0;
 int soundThreshold = 510; 
@@ -27,41 +24,36 @@ int soundThreshold = 510;
 bool isAutoMoving = false;
 bool isManualMoving = false;
 unsigned long demoStartTime = 0;
-const int demoDuration = 6000; // 觸發後安撫 6 秒
-
-// 搖擺控制變數 (原地搖動用)
+const int demoDuration = 6000; 
 unsigned long lastRockTime = 0;
 int rockStep = 0; 
+int triggerCount = 0; 
+unsigned long lastTriggerTime = 0;
 
 void setup() {
   mySerial.begin(9600);
   Wire.begin(); 
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { for(;;); }
-  
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  updateScreen("SYSTEM READY", "Monitoring...");
-
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    mySerial.println(F("OLED Error: 0x3C not found"));
+  } else {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    updateScreen("SYSTEM READY", "Monitoring...");
+  }
   pinMode(Motor_IA1, OUTPUT); pinMode(Motor_IB1, OUTPUT);
   pinMode(Motor_IA2, OUTPUT); pinMode(Motor_IB2, OUTPUT);
   pinMode(13, OUTPUT);
-  
   stopMotors();
 }
 
 void loop() {
-  // 1. 藍牙控制
   if (mySerial.available() > 0) {
     char cmd = toupper((char)mySerial.read());
     handleCommand(cmd);
   }
-
-  // 2. 哭聲偵測 (僅在靜止狀態偵測)
   if (!isAutoMoving && !isManualMoving) {
     checkMic();
   }
-
-  // 3. 自動安撫模式 (原地搖擺邏輯)
   if (isAutoMoving) {
     if (millis() - demoStartTime < demoDuration) {
       handleRocking(); 
@@ -71,32 +63,24 @@ void loop() {
   }
 }
 
-// 核心功能：原地搖擺 (前進 -> 停 -> 後退 -> 停)
 void handleRocking() {
   unsigned long now = millis();
-  // 每 400ms 切換一個動作，讓搖晃感更平緩
   if (now - lastRockTime > 400) { 
     lastRockTime = now;
     rockStep = (rockStep + 1) % 4;
-    
     switch(rockStep) {
-      case 0: moveForward(); break;  // 輕微前進 (使用 100 PWM)
-      case 1: stopMotors();  break;  // 停頓
-      case 2: moveBackward(); break; // 輕微後退 (使用 100 PWM)
-      case 3: stopMotors();  break;  // 停頓
+      case 0: moveForward(); break;
+      case 1: stopMotors(); break;
+      case 2: moveBackward(); break;
+      case 3: stopMotors(); break;
     }
   }
 }
-
-int triggerCount = 0; // 記錄連續觸發次數
-unsigned long lastTriggerTime = 0; // 上一次偵測到高音量的時間
 
 void checkMic() {
   unsigned long startMillis = millis();
   unsigned int signalMax = 0;
   unsigned int signalMin = 1024;
-
-  // 方案 B：維持 100ms 採樣，確保抓到完整波幅
   while (millis() - startMillis < 100) {
     unsigned int sample = analogRead(micPin);
     if (sample < 1024) {
@@ -105,32 +89,18 @@ void checkMic() {
     }
   }
   peakToPeak = signalMax - signalMin;
-
-  // 每 500ms 更新螢幕顯示 (觀察用)
   static unsigned long lastDisplay = 0;
   if (millis() - lastDisplay > 500) { 
     drawVolumeBar();
     lastDisplay = millis();
   }
-
-  // --- 方案 C 邏輯開始 ---
   if (peakToPeak > soundThreshold) {
     unsigned long now = millis();
-    
-    // 如果距離上次高音偵測太久（例如超過 2 秒），重置計數器
-    // 這樣可以過濾掉偶爾出現的一次性噪音（如關門聲）
-    if (now - lastTriggerTime > 2000) {
-      triggerCount = 0;
-    }
-
+    if (now - lastTriggerTime > 2000) triggerCount = 0;
     triggerCount++;
     lastTriggerTime = now;
-    
-    mySerial.print("Trigger Step: "); mySerial.println(triggerCount);
-
-    // 只有連續偵測到 3 次高音量，才判定為哭聲
     if (triggerCount >= 3) {
-      triggerCount = 0; // 觸發後歸零
+      triggerCount = 0;
       startAutoResponse();
     }
   }
@@ -141,7 +111,6 @@ void startAutoResponse() {
   demoStartTime = millis();
   lastRockTime = millis();
   rockStep = 0;
-  
   updateScreen("CRY DETECTED!", "Action: ROCKING");
   playMP3(1);     
   digitalWrite(13, HIGH);
@@ -166,17 +135,12 @@ void handleCommand(char cmd) {
   }
 }
 
-// --- 更新後的運動控制 (PWM 已調降) ---
-// 直行使用 100
 void moveForward() { analogWrite(Motor_IA2, 100); digitalWrite(Motor_IA1, LOW); analogWrite(Motor_IB1, 100); digitalWrite(Motor_IB2, LOW); }
 void moveBackward() { digitalWrite(Motor_IA2, LOW); analogWrite(Motor_IA1, 100); digitalWrite(Motor_IB1, LOW); analogWrite(Motor_IB2, 100); }
-// 轉向使用 75 (更慢更精準)
 void turnLeft() { digitalWrite(Motor_IA2, LOW); analogWrite(Motor_IA1, 75); analogWrite(Motor_IB1, 75); digitalWrite(Motor_IB2, LOW); }
 void turnRight() { analogWrite(Motor_IA2, 75); digitalWrite(Motor_IA1, LOW); digitalWrite(Motor_IB1, LOW); analogWrite(Motor_IB2, 75); }
-
 void stopMotors() { digitalWrite(Motor_IA1, LOW); digitalWrite(Motor_IA2, LOW); digitalWrite(Motor_IB1, LOW); digitalWrite(Motor_IB2, LOW); }
 
-// --- 其他功能保持不變 ---
 void updateScreen(String title, String subtitle) {
   display.clearDisplay();
   display.setTextSize(1); display.setCursor(0,0);
